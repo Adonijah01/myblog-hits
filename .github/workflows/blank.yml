@@ -1,36 +1,63 @@
-# This is a basic workflow to help you get started with Actions
+name: Update Hit Counts
 
-name: CI
-
-# Controls when the workflow will run
 on:
-  # Triggers the workflow on push or pull request events but only for the "main" branch
-  push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
+  repository_dispatch:
+    types: [update_hits]
 
-  # Allows you to run this workflow manually from the Actions tab
-  workflow_dispatch:
-
-# A workflow run is made up of one or more jobs that can run sequentially or in parallel
 jobs:
-  # This workflow contains a single job called "build"
-  build:
-    # The type of runner that the job will run on
+  update-hits:
     runs-on: ubuntu-latest
-
-    # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
-      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - uses: actions/checkout@v4
-
-      # Runs a single command using the runners shell
-      - name: Run a one-line script
-        run: echo Hello, world!
-
-      # Runs a set of commands using the runners shell
-      - name: Run a multi-line script
+      - uses: actions/checkout@v2
+      
+      - name: Update hit count
+        env:
+          MYBLOG_GH_TOKEN: ${{ secrets.MYBLOG_GH_TOKEN }}
         run: |
-          echo Add other actions to build,
-          echo test, and deploy your project.
+          echo "Received payload: ${{ toJSON(github.event.client_payload) }}"
+          
+          # Create hits.json if it doesn't exist
+          if [ ! -f hits.json ]; then
+            echo '{"hits":{}}' > hits.json
+          fi
+          
+          # Get the current hits file
+          curl -s -H "Authorization: token $MYBLOG_GH_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/contents/hits.json" > current.json || echo '{"hits":{}}' > current.json
+          
+          # Update the hit count
+          POST_PATH="${{ github.event.client_payload.post_path }}"
+          NEW_COUNT="${{ github.event.client_payload.count }}"
+          
+          echo "Updating count for $POST_PATH to $NEW_COUNT"
+          
+          # Update the JSON file
+          jq --arg path "$POST_PATH" --arg count "$NEW_COUNT" \
+            '.hits[$path] = ($count | tonumber)' current.json > hits_updated.json
+          
+          # Get the file SHA if it exists
+          SHA=$(jq -r '.sha // empty' current.json)
+          
+          # Prepare the API request
+          if [ -n "$SHA" ]; then
+            # Update existing file
+            curl -X PUT \
+              -H "Authorization: token $MYBLOG_GH_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "{
+                \"message\": \"Update hit count for $POST_PATH\",
+                \"content\": \"$(base64 -w 0 hits_updated.json)\",
+                \"sha\": \"$SHA\"
+              }" \
+              "https://api.github.com/repos/${{ github.repository }}/contents/hits.json"
+          else
+            # Create new file
+            curl -X PUT \
+              -H "Authorization: token $MYBLOG_GH_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "{
+                \"message\": \"Create hits.json with count for $POST_PATH\",
+                \"content\": \"$(base64 -w 0 hits_updated.json)\"
+              }" \
+              "https://api.github.com/repos/${{ github.repository }}/contents/hits.json"
+          fi 
